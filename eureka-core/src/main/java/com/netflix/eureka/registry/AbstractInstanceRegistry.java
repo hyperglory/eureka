@@ -320,11 +320,15 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         try {
             read.lock();
             CANCEL.increment(isReplication);
+
+            // 将服务实例从eureka server的map结构的注册表中移除掉
             Map<String, Lease<InstanceInfo>> gMap = registry.get(appName);
             Lease<InstanceInfo> leaseToCancel = null;
             if (gMap != null) {
                 leaseToCancel = gMap.remove(id);
             }
+
+            // 将服务实例加入最近下线的一个queue中
             synchronized (recentCanceledQueue) {
                 recentCanceledQueue.add(new Pair<Long, String>(System.currentTimeMillis(), appName + "(" + id + ")"));
             }
@@ -337,17 +341,28 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 logger.warn("DS: Registry: cancel failed because Lease is not registered for: {}/{}", appName, id);
                 return false;
             } else {
+                // 调用lease的cancel方法
                 leaseToCancel.cancel();
                 InstanceInfo instanceInfo = leaseToCancel.getHolder();
                 String vip = null;
                 String svip = null;
                 if (instanceInfo != null) {
+                    // 将服务实例信息扔到最近改变的队列中去了
                     instanceInfo.setActionType(ActionType.DELETED);
                     recentlyChangedQueue.add(new RecentlyChangedItem(leaseToCancel));
+                    // 设置了服务实例的lastUpdatedTimestamp，最近一次变更的时间戳
                     instanceInfo.setLastUpdatedTimestamp();
                     vip = instanceInfo.getVIPAddress();
                     svip = instanceInfo.getSecureVipAddress();
+
+                    /*
+                      服务的注册、下线、故障摘除，都会代表这个服务实例变化了，都会将自己放入最近改变的队列中去
+                      这个最近改变的队列，只会保留最近3分钟的服务实例
+                      所以说eureka client拉取增量注册表的时候，其实就是拉取最近3分钟有变化的服务实例的注册表
+                     */
                 }
+
+                // 过期掉这个注册表缓存
                 invalidateCache(appName, vip, svip);
                 logger.info("Cancelled instance {}/{} (replication={})", appName, id, isReplication);
                 return true;
@@ -1347,8 +1362,10 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             public void run() {
                 Iterator<RecentlyChangedItem> it = recentlyChangedQueue.iterator();
                 while (it.hasNext()) {
+                    // 说明这个记录进入队列的时间超过3分钟了
                     if (it.next().getLastUpdateTime() <
                             System.currentTimeMillis() - serverConfig.getRetentionTimeInMSInDeltaQueue()) {
+                        // 就将这条记录从队列中移除掉
                         it.remove();
                     } else {
                         break;
