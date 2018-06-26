@@ -60,6 +60,11 @@ public class Lease<T> {
      * {@link #DEFAULT_DURATION_IN_SECS}.
      */
     public void renew() {
+        /*
+          每次服务发送一次心跳，保持心跳，其实靠的就是刷新这个lastUpdateTimestamp
+          类似于最近一次活跃的时间
+          比如说上一次心跳的时间，是19:55:00 + 90s = 19:56:30
+         */
         lastUpdateTimestamp = System.currentTimeMillis() + duration;
 
     }
@@ -108,6 +113,27 @@ public class Lease<T> {
      * @param additionalLeaseMs any additional lease time to add to the lease evaluation in ms.
      */
     public boolean isExpired(long additionalLeaseMs) {
+        /*
+          当前时间是否大于了上一次心跳的时间，再加上90s，再加上additionalLeaseMs(compensationTime，补偿时间，92s)
+          20:02:32
+          20:02:32 > 19:56:30 + 90s + 92s = 19:58:00 + 92s = 19:59:32
+
+          不看那个补偿时间，假如说，当前时间比上次心跳的时间差了超过90s，说明，90s之内，都没有更新过心跳
+          就说明那个服务实例在90s内没有更新过心跳
+          此时就认为那个服务实例可能已经宕机了
+
+          19:55:00 -> 如果到了19:56:30，没有心跳，就该认为服务实例故障了
+          19:56:30 -> 如果到了19:56:30，没有心跳，还不会认为服务实例宕机了
+          19:58:01 -> 19:56:30 + 90s = 19:58:00 + 92s = 19:59:32
+          差不多至少要等到20:00:00，才能认为这个服务实例过期了
+
+          你需要等待2个90s后，都没有心跳，才会认为这个服务实例挂掉了，才会下线，90s，180s，3分钟没有心跳才会认为这个服务实例宕机了，下线了
+
+          源码层面是有bug的，90 * 2 = 180s，才会服务实例下线
+          失效多级缓存，30s才能同步，服务30s才会重新抓取增量注册表
+
+          一个服务实例挂掉之后，可能要过几分钟，四五分钟，才能让其他的服务感知到
+         */
         return (evictionTimestamp > 0 || System.currentTimeMillis() > (lastUpdateTimestamp + duration + additionalLeaseMs));
     }
 
